@@ -1,0 +1,166 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Slyberry ShopScan</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0f766e">
+<style>
+body{font-family:system-ui,sans-serif;margin:0;background:#f4f4f5;padding-bottom:70px;color:#111}
+h2{margin:8px 0}.c{padding:14px}
+input{width:100%;box-sizing:border-box;padding:12px;margin:5px 0;font-size:16px;border:1px solid #bbb;border-radius:8px}
+button{padding:12px 14px;font-size:16px;border:0;border-radius:8px;background:#0f766e;color:#fff}
+button.o{background:#fff;color:#0f766e;border:1px solid #0f766e}button.d{background:#b91c1c}
+button.w{width:100%;margin:5px 0}
+.r{display:flex;align-items:center;gap:8px;background:#fff;padding:10px;margin:6px 0;border-radius:8px}
+.g{flex:1}.low{color:#b91c1c;font-weight:bold}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:#fff;border-top:1px solid #ccc}
+nav button{flex:1;background:none;color:#555;border-radius:0}nav button.on{color:#0f766e;font-weight:bold}
+#scanbox{padding:10px;background:#000;text-align:center}#cam{width:100%;max-height:240px}
+#toast{position:fixed;top:12px;left:12px;right:12px;background:#111;color:#fff;padding:12px;border-radius:8px;display:none;z-index:9}
+.tot{font-size:22px;font-weight:bold;margin:10px 0}
+</style></head><body>
+<div id="toast"></div>
+<div id="scanbox" hidden><video id="cam" playsinline muted></video><br><button class="o" onclick="closeScan()">Close scanner</button></div>
+<div id="app"></div>
+<script>
+const $=s=>document.querySelector(s);
+const L=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}};
+const S=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money=n=>'₦'+Number(n).toLocaleString('en-NG',{minimumFractionDigits:2,maximumFractionDigits:2});
+const sha=async t=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(t)))].map(b=>b.toString(16).padStart(2,'0')).join('');
+let products=L('p',[]),sales=L('s',[]),cfg=L('cfg',null),cart=[],admin=false,tab='sell',editing=null,scanCb=null,stream=null,timer=null;
+function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2500)}
+
+// ---------- scanner ----------
+async function openScan(cb){
+  if(!('BarcodeDetector' in window)){toast('Camera scanning is not supported in this browser. Type the barcode instead.');return}
+  scanCb=cb;
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+    const v=$('#cam');v.srcObject=stream;await v.play();$('#scanbox').hidden=false;
+    const d=new BarcodeDetector();let last='',lt=0;
+    timer=setInterval(async()=>{try{const r=await d.detect(v);if(r[0]){const c=r[0].rawValue,n=Date.now();if(c!==last||n-lt>2000){last=c;lt=n;scanCb(c)}}}catch(e){}},300);
+  }catch(e){toast('Could not open the camera. Allow camera permission.')}
+}
+function closeScan(){clearInterval(timer);if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;$('#scanbox').hidden=true}
+
+// ---------- PIN ----------
+async function setPin(){
+  const a=$('#p1').value,b=$('#p2').value;
+  if(a.length<4)return toast('PIN must be at least 4 digits');
+  if(a!==b)return toast('PINs do not match');
+  const salt=crypto.randomUUID();cfg={salt,hash:await sha(salt+a)};S('cfg',cfg);admin=true;
+  if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();
+  render();
+}
+async function unlock(){
+  if(await sha(cfg.salt+$('#pin').value)===cfg.hash){admin=true;render()}else toast('Wrong PIN');
+}
+
+// ---------- cart ----------
+function addCode(c){
+  const p=products.find(x=>x.bc===String(c).trim());
+  if(!p)return toast('No product with barcode '+c);
+  const l=cart.find(x=>x.id===p.id),q=(l?l.q:0)+1;
+  if(q>p.stock)return toast(p.stock<=0?p.name+' is out of stock':'Only '+p.stock+' of '+p.name+' in stock');
+  if(l)l.q=q;else cart.push({id:p.id,q:1});
+  render();
+}
+function manualAdd(){const v=$('#man').value;if(v.trim())addCode(v);}
+function qty(id,d){
+  const l=cart.find(x=>x.id===id),p=products.find(x=>x.id===id),q=l.q+d;
+  if(q<=0)cart=cart.filter(x=>x.id!==id);
+  else if(q>p.stock)return toast('Only '+p.stock+' of '+p.name+' in stock');
+  else l.q=q;
+  render();
+}
+function checkout(){
+  if(!cart.length)return;
+  for(const l of cart){const p=products.find(x=>x.id===l.id);if(!p||p.stock<l.q)return toast('Not enough stock for '+(p?p.name:'item'))}
+  const items=cart.map(l=>{const p=products.find(x=>x.id===l.id);return{n:p.name,q:l.q,price:p.price,cost:p.cost}});
+  const total=items.reduce((a,i)=>a+i.price*i.q,0);
+  cart.forEach(l=>{products.find(x=>x.id===l.id).stock-=l.q});
+  sales.push({id:sales.length+1,t:Date.now(),items,total});
+  S('p',products);S('s',sales);cart=[];
+  toast('Sale #'+sales.length+' saved: '+money(total));render();
+}
+
+// ---------- products ----------
+function saveProduct(){
+  const g=i=>$('#'+i).value.trim();
+  const name=g('f_n'),bc=g('f_b'),price=parseFloat(g('f_p')),cost=g('f_c')?parseFloat(g('f_c')):0;
+  const stock=g('f_s')?parseInt(g('f_s')):0,low=g('f_l')?parseInt(g('f_l')):0;
+  if(!name)return toast('Enter a name');
+  if(!bc)return toast('Enter or scan a barcode');
+  if(isNaN(price)||price<0)return toast('Enter a valid selling price');
+  if(isNaN(cost)||cost<0||isNaN(stock)||stock<0||isNaN(low)||low<0)return toast('Check cost, stock and low-stock numbers');
+  const id=editing==='new'?Date.now():editing;
+  if(products.some(x=>x.bc===bc&&x.id!==id))return toast('Another product already uses this barcode');
+  const p={id,name,bc,cat:g('f_k'),price,cost,stock,low};
+  const i=products.findIndex(x=>x.id===id);
+  if(i>=0)products[i]=p;else products.push(p);
+  S('p',products);editing=null;closeScan();render();
+}
+function delProduct(){
+  if(!confirm('Delete this product? Past sales keep their records.'))return;
+  products=products.filter(x=>x.id!==editing);cart=cart.filter(x=>x.id!==editing);
+  S('p',products);editing=null;render();
+}
+function scanIntoForm(){openScan(c=>{$('#f_b').value=c;closeScan()})}
+
+// ---------- views ----------
+function viewSell(){
+  const rows=cart.map(l=>{const p=products.find(x=>x.id===l.id);
+    return `<div class="r"><div class="g"><b>${esc(p.name)}</b><br>${money(p.price)} × ${l.q} = ${money(p.price*l.q)}</div>
+    <button class="o" onclick="qty(${l.id},-1)">−</button><b>${l.q}</b><button class="o" onclick="qty(${l.id},1)">+</button></div>`}).join('');
+  const total=cart.reduce((a,l)=>a+products.find(x=>x.id===l.id).price*l.q,0);
+  return `<div class="c"><button class="w" onclick="openScan(addCode)">Scan barcode</button>
+  <div style="display:flex;gap:8px"><input id="man" placeholder="Type barcode"><button onclick="manualAdd()">Add</button></div>
+  ${rows||'<p>Cart is empty. Scan or type a barcode.</p>'}
+  <div class="tot">Total: ${money(total)}</div>
+  <div style="display:flex;gap:8px"><button class="o" onclick="cart=[];render()">Clear</button><button style="flex:1" onclick="checkout()">Checkout</button></div></div>`;
+}
+function viewProducts(){
+  if(!admin)return `<div class="c"><h2>Admin only</h2><input id="pin" type="password" inputmode="numeric" placeholder="Admin PIN"><button class="w" onclick="unlock()">Unlock</button></div>`;
+  if(editing){
+    const p=editing==='new'?{name:'',bc:'',cat:'',price:'',cost:'',stock:'',low:5}:products.find(x=>x.id===editing);
+    return `<div class="c"><h2>${editing==='new'?'New product':'Edit product'}</h2>
+    <input id="f_n" placeholder="Name" value="${esc(p.name)}">
+    <div style="display:flex;gap:8px"><input id="f_b" placeholder="Barcode" value="${esc(p.bc)}"><button class="o" onclick="scanIntoForm()">Scan</button></div>
+    <input id="f_k" placeholder="Category (optional)" value="${esc(p.cat||'')}">
+    <input id="f_p" type="number" inputmode="decimal" placeholder="Selling price" value="${p.price}">
+    <input id="f_c" type="number" inputmode="decimal" placeholder="Cost price (optional)" value="${p.cost||''}">
+    <input id="f_s" type="number" inputmode="numeric" placeholder="Stock quantity" value="${p.stock}">
+    <input id="f_l" type="number" inputmode="numeric" placeholder="Low-stock level" value="${p.low}">
+    <button class="w" onclick="saveProduct()">Save</button>
+    <button class="w o" onclick="editing=null;closeScan();render()">Cancel</button>
+    ${editing!=='new'?'<button class="w d" onclick="delProduct()">Delete product</button>':''}</div>`;
+  }
+  const q=($('#q')?$('#q').value:'').toLowerCase();
+  const list=products.filter(p=>!q||p.name.toLowerCase().includes(q)||p.bc.includes(q)).sort((a,b)=>a.name.localeCompare(b.name))
+    .map(p=>`<div class="r" onclick="editing=${p.id};render()"><div class="g"><b>${esc(p.name)}</b><br>${esc(p.bc)} • ${money(p.price)}<br>
+    <span class="${p.stock<=p.low?'low':''}">Stock: ${p.stock}${p.stock<=p.low?' (LOW)':''}</span></div></div>`).join('');
+  return `<div class="c"><div style="display:flex;gap:8px"><button style="flex:1" onclick="editing='new';render()">Add product</button><button class="o" onclick="admin=false;render()">Lock</button></div>
+  <input id="q" placeholder="Search name or barcode" oninput="render();const e=$('#q');e.focus();e.setSelectionRange(e.value.length,e.value.length)" value="${esc(q)}">
+  <p>${products.length} products</p>${list}</div>`;
+}
+function viewSales(){
+  const day=new Date().toDateString(),t=sales.filter(s=>new Date(s.t).toDateString()===day);
+  const sum=t.reduce((a,s)=>a+s.total,0);
+  const rows=sales.slice(-20).reverse().map(s=>`<div class="r"><div class="g"><b>Sale #${s.id}</b> • ${new Date(s.t).toLocaleString()}<br>${s.items.map(i=>esc(i.n)+' ×'+i.q).join(', ')}</div><b>${money(s.total)}</b></div>`).join('');
+  return `<div class="c"><h2>Today</h2><div class="tot">${money(sum)}</div><p>${t.length} sales today</p><h3>Recent sales</h3>${rows||'<p>No sales yet.</p>'}</div>`;
+}
+function render(){
+  const a=$('#app');
+  if(!cfg){
+    a.innerHTML=`<div class="c"><h2>Slyberry ShopScan</h2><p>Create an admin PIN (4+ digits). It protects the Products tab.</p>
+    <input id="p1" type="password" inputmode="numeric" placeholder="New PIN"><input id="p2" type="password" inputmode="numeric" placeholder="Confirm PIN"><button class="w" onclick="setPin()">Save PIN</button></div>`;
+    return;
+  }
+  a.innerHTML=(tab==='sell'?viewSell():tab==='prod'?viewProducts():viewSales())+
+  `<nav>${[['sell','🛒 Sell'],['prod','📦 Products'],['sales','🧾 Sales']].map(([k,n])=>`<button class="${tab===k?'on':''}" onclick="tab='${k}';closeScan();render()">${n}</button>`).join('')}</nav>`;
+}
+render();
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
+</script></body></html>
